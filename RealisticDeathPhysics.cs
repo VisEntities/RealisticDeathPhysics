@@ -10,7 +10,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Realistic Death Physics", "VisEntities", "1.0.0")]
+    [Info("Realistic Death Physics", "VisEntities", "1.1.0")]
     [Description("Launches player corpses in the direction of the killing blow.")]
     public class RealisticDeathPhysics : RustPlugin
     {
@@ -31,6 +31,9 @@ namespace Oxide.Plugins
 
             [JsonProperty("Impact Force Multiplier")]
             public float ImpactForceMultiplier { get; set; }
+
+            [JsonProperty("Include NPC Corpses")]
+            public bool IncludeNPCCorpses { get; set; }
         }
 
         protected override void LoadConfig()
@@ -63,6 +66,9 @@ namespace Oxide.Plugins
             if (string.Compare(_config.Version, "1.0.0") < 0)
                 _config = defaultConfig;
 
+            if (string.Compare(_config.Version, "1.1.0") < 0)
+                _config = defaultConfig;
+
             PrintWarning("Config update complete! Updated from version " + _config.Version + " to " + Version.ToString());
             _config.Version = Version.ToString();
         }
@@ -73,6 +79,7 @@ namespace Oxide.Plugins
             {
                 Version = Version.ToString(),
                 ImpactForceMultiplier = 0.2f,
+                IncludeNPCCorpses = true,
             };
         }
 
@@ -94,7 +101,10 @@ namespace Oxide.Plugins
 
         private void OnEntityDeath(BasePlayer victim, HitInfo deathInfo)
         {
-            if (victim == null || victim.IsNpc || deathInfo == null)
+            if (victim == null || deathInfo == null)
+                return;
+
+            if (victim.IsNpc && !_config.IncludeNPCCorpses)
                 return;
 
             Vector3 direction = Vector3.zero;
@@ -140,13 +150,31 @@ namespace Oxide.Plugins
             });
         }
 
+        private void OnEntitySpawned(NPCPlayerCorpse corpse)
+        {
+            if (corpse == null || !_config.IncludeNPCCorpses)
+                return;
+
+            ImpactData data;
+            if (!_pendingImpacts.TryGetValue(corpse.playerSteamID, out data))
+                return;
+
+            _pendingImpacts.Remove(corpse.playerSteamID);
+
+            timer.Once(0f, delegate
+            {
+                ApplyForceToCorpse(corpse, data);
+            });
+        }
+
         #endregion Oxide Hooks
 
         #region Helpers
 
-        private void ApplyForceToCorpse(PlayerCorpse corpse, ImpactData data)
+        private void ApplyForceToCorpse(BaseCorpse corpse, ImpactData data)
         {
-            if (corpse == null) return;
+            if (corpse == null)
+                return;
 
             Rigidbody rootBody = corpse.GetComponent<Rigidbody>();
             if (rootBody != null)
