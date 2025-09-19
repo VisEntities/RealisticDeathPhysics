@@ -5,12 +5,13 @@
  */
 
 using Newtonsoft.Json;
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Realistic Death Physics", "VisEntities", "1.1.0")]
+    [Info("Realistic Death Physics", "VisEntities", "1.2.0")]
     [Description("Launches player corpses in the direction of the killing blow.")]
     public class RealisticDeathPhysics : RustPlugin
     {
@@ -18,7 +19,7 @@ namespace Oxide.Plugins
 
         private static RealisticDeathPhysics _plugin;
         private static Configuration _config;
-        private readonly Dictionary<ulong, ImpactData> _pendingImpacts = new Dictionary<ulong, ImpactData>();
+        private readonly Dictionary<ulong, ImpactInfo> _pendingImpacts = new Dictionary<ulong, ImpactInfo>();
 
         #endregion Fields
 
@@ -34,6 +35,9 @@ namespace Oxide.Plugins
 
             [JsonProperty("Include NPC Corpses")]
             public bool IncludeNPCCorpses { get; set; }
+
+            [JsonProperty("Allowed Killer Weapon Shortnames (leave empty to allow all)")]
+            public List<string> AllowedKillerWeaponShortnames { get; set; }
         }
 
         protected override void LoadConfig()
@@ -66,8 +70,8 @@ namespace Oxide.Plugins
             if (string.Compare(_config.Version, "1.0.0") < 0)
                 _config = defaultConfig;
 
-            if (string.Compare(_config.Version, "1.1.0") < 0)
-                _config = defaultConfig;
+            if (string.Compare(_config.Version, "1.2.0") < 0)
+                _config.AllowedKillerWeaponShortnames = defaultConfig.AllowedKillerWeaponShortnames;
 
             PrintWarning("Config update complete! Updated from version " + _config.Version + " to " + Version.ToString());
             _config.Version = Version.ToString();
@@ -80,6 +84,7 @@ namespace Oxide.Plugins
                 Version = Version.ToString(),
                 ImpactForceMultiplier = 0.2f,
                 IncludeNPCCorpses = true,
+                AllowedKillerWeaponShortnames = new List<string>()
             };
         }
 
@@ -107,6 +112,9 @@ namespace Oxide.Plugins
             if (victim.IsNpc && !_config.IncludeNPCCorpses)
                 return;
 
+            if (!CanWeaponTriggerLaunch(deathInfo))
+                return;
+
             Vector3 direction = Vector3.zero;
             if (deathInfo.ProjectileVelocity != Vector3.zero)
             {
@@ -124,13 +132,13 @@ namespace Oxide.Plugins
             if (magnitude <= 0f)
                 magnitude = 50f;
 
-            var data = new ImpactData
+            var impactInfo = new ImpactInfo
             {
                 Direction = direction,
                 Force = magnitude * _config.ImpactForceMultiplier
             };
 
-            _pendingImpacts[victim.userID] = data;
+            _pendingImpacts[victim.userID] = impactInfo;
         }
 
         private void OnPlayerCorpseSpawned(BasePlayer player, PlayerCorpse corpse)
@@ -138,15 +146,15 @@ namespace Oxide.Plugins
             if (corpse == null || player == null)
                 return;
 
-            ImpactData data;
-            if (!_pendingImpacts.TryGetValue(player.userID, out data))
+            ImpactInfo impactInfo;
+            if (!_pendingImpacts.TryGetValue(player.userID, out impactInfo))
                 return;
 
             _pendingImpacts.Remove(player.userID);
 
             timer.Once(0f, delegate
             {
-                ApplyForceToCorpse(corpse, data);
+                ApplyForceToCorpse(corpse, impactInfo);
             });
         }
 
@@ -155,15 +163,15 @@ namespace Oxide.Plugins
             if (corpse == null || !_config.IncludeNPCCorpses)
                 return;
 
-            ImpactData data;
-            if (!_pendingImpacts.TryGetValue(corpse.playerSteamID, out data))
+            ImpactInfo impactInfo;
+            if (!_pendingImpacts.TryGetValue(corpse.playerSteamID, out impactInfo))
                 return;
 
             _pendingImpacts.Remove(corpse.playerSteamID);
 
             timer.Once(0f, delegate
             {
-                ApplyForceToCorpse(corpse, data);
+                ApplyForceToCorpse(corpse, impactInfo);
             });
         }
 
@@ -171,14 +179,71 @@ namespace Oxide.Plugins
 
         #region Helpers
 
-        private void ApplyForceToCorpse(BaseCorpse corpse, ImpactData data)
+        private string GetWeaponShortnameFromHitInfo(HitInfo deathInfo)
+        {
+            if (deathInfo == null)
+                return null;
+
+            if (deathInfo.Weapon != null)
+            {
+                Item item = deathInfo.Weapon.GetItem();
+                if (item != null && item.info != null && !string.IsNullOrEmpty(item.info.shortname))
+                    return item.info.shortname;
+            }
+
+            string prefabName = null;
+            if (deathInfo.WeaponPrefab != null && !string.IsNullOrEmpty(deathInfo.WeaponPrefab.name))
+                prefabName = deathInfo.WeaponPrefab.name;
+
+            if (!string.IsNullOrEmpty(prefabName))
+            {
+                int lastSlash = prefabName.LastIndexOf('/');
+                if (lastSlash >= 0 && lastSlash + 1 < prefabName.Length)
+                    prefabName = prefabName.Substring(lastSlash + 1);
+
+                if (prefabName.EndsWith(".prefab"))
+                    prefabName = prefabName.Substring(0, prefabName.Length - ".prefab".Length);
+
+                return prefabName;
+            }
+
+            if (deathInfo.Weapon != null)
+            {
+                string shortPrefab = deathInfo.Weapon.ShortPrefabName;
+                if (!string.IsNullOrEmpty(shortPrefab))
+                    return shortPrefab;
+            }
+
+            return null;
+        }
+
+        private bool CanWeaponTriggerLaunch(HitInfo deathInfo)
+        {
+            if (_config.AllowedKillerWeaponShortnames == null || _config.AllowedKillerWeaponShortnames.Count == 0)
+                return true;
+
+            string foundName = GetWeaponShortnameFromHitInfo(deathInfo);
+            if (string.IsNullOrEmpty(foundName))
+                return false;
+
+            for (int i = 0; i < _config.AllowedKillerWeaponShortnames.Count; i++)
+            {
+                string allowed = _config.AllowedKillerWeaponShortnames[i];
+                if (!string.IsNullOrEmpty(allowed) && string.Equals(allowed, foundName, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private void ApplyForceToCorpse(BaseCorpse corpse, ImpactInfo impactInfo)
         {
             if (corpse == null)
                 return;
 
             Rigidbody rootBody = corpse.GetComponent<Rigidbody>();
             if (rootBody != null)
-                rootBody.AddForce(data.Direction * data.Force, ForceMode.Impulse);
+                rootBody.AddForce(impactInfo.Direction * impactInfo.Force, ForceMode.Impulse);
 
             var bodies = corpse.GetComponentsInChildren<Rigidbody>();
             foreach (var rb in bodies)
@@ -186,11 +251,11 @@ namespace Oxide.Plugins
                 if (rb == null || rb == rootBody)
                     continue;
 
-                rb.AddForce(data.Direction * data.Force, ForceMode.Impulse);
+                rb.AddForce(impactInfo.Direction * impactInfo.Force, ForceMode.Impulse);
             }
         }
 
-        private sealed class ImpactData
+        private sealed class ImpactInfo
         {
             public Vector3 Direction;
             public float Force;
