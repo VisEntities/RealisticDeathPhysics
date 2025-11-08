@@ -5,13 +5,12 @@
  */
 
 using Newtonsoft.Json;
-using System;
 using System.Collections.Generic;
 using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Realistic Death Physics", "VisEntities", "1.2.0")]
+    [Info("Realistic Death Physics", "VisEntities", "1.3.0")]
     [Description("Launches player corpses in the direction of the killing blow.")]
     public class RealisticDeathPhysics : RustPlugin
     {
@@ -30,14 +29,26 @@ namespace Oxide.Plugins
             [JsonProperty("Version")]
             public string Version { get; set; }
 
-            [JsonProperty("Impact Force Multiplier")]
-            public float ImpactForceMultiplier { get; set; }
+            [JsonProperty("Default Launch Strength")]
+            public float DefaultLaunchStrength { get; set; }
 
-            [JsonProperty("Include NPC Corpses")]
-            public bool IncludeNPCCorpses { get; set; }
+            [JsonProperty("Affect NPC Corpses")]
+            public bool AffectNPCCorpses { get; set; }
 
-            [JsonProperty("Allowed Killer Weapon Shortnames (leave empty to allow all)")]
-            public List<string> AllowedKillerWeaponShortnames { get; set; }
+            [JsonProperty("Enable For Unlisted Weapons")]
+            public bool EnableForUnlistedWeapons { get; set; }
+
+            [JsonProperty("Weapon Overrides")]
+            public Dictionary<string, WeaponOverrideConfig> WeaponOverrides { get; set; }
+        }
+
+        private class WeaponOverrideConfig
+        {
+            [JsonProperty("Enabled")]
+            public bool Enabled { get; set; }
+
+            [JsonProperty("Launch Strength Override")]
+            public float LaunchStrengthOverride { get; set; }
         }
 
         protected override void LoadConfig()
@@ -70,8 +81,8 @@ namespace Oxide.Plugins
             if (string.Compare(_config.Version, "1.0.0") < 0)
                 _config = defaultConfig;
 
-            if (string.Compare(_config.Version, "1.2.0") < 0)
-                _config.AllowedKillerWeaponShortnames = defaultConfig.AllowedKillerWeaponShortnames;
+            if (string.Compare(_config.Version, "1.3.0") < 0)
+                _config = defaultConfig;
 
             PrintWarning("Config update complete! Updated from version " + _config.Version + " to " + Version.ToString());
             _config.Version = Version.ToString();
@@ -82,9 +93,42 @@ namespace Oxide.Plugins
             return new Configuration
             {
                 Version = Version.ToString(),
-                ImpactForceMultiplier = 0.2f,
-                IncludeNPCCorpses = true,
-                AllowedKillerWeaponShortnames = new List<string>()
+                DefaultLaunchStrength = 0.2f,
+                AffectNPCCorpses = true,
+                EnableForUnlistedWeapons = true,
+                WeaponOverrides = new Dictionary<string, WeaponOverrideConfig>
+                {
+                    ["rifle.ak"] = new WeaponOverrideConfig
+                    {
+                        Enabled = true,
+                        LaunchStrengthOverride = 0.25f
+                    },
+                    ["rocket_basic"] = new WeaponOverrideConfig
+                    {
+                        Enabled = true,
+                        LaunchStrengthOverride = 0.60f
+                    },
+                    ["shotgun.spas.12"] = new WeaponOverrideConfig
+                    {
+                        Enabled = true,
+                        LaunchStrengthOverride = 0.30f
+                    },
+                    ["rifle.semiauto"] = new WeaponOverrideConfig
+                    {
+                        Enabled = true,
+                        LaunchStrengthOverride = 0.22f
+                    },
+                    ["crossbow"] = new WeaponOverrideConfig
+                    {
+                        Enabled = true,
+                        LaunchStrengthOverride = 0.16f
+                    },
+                    ["smg.mp5"] = new WeaponOverrideConfig
+                    {
+                        Enabled = true,
+                        LaunchStrengthOverride = 0.21f
+                    }
+                }
             };
         }
 
@@ -109,7 +153,7 @@ namespace Oxide.Plugins
             if (victim == null || deathInfo == null)
                 return;
 
-            if (victim.IsNpc && !_config.IncludeNPCCorpses)
+            if (victim.IsNpc && !_config.AffectNPCCorpses)
                 return;
 
             if (!CanWeaponTriggerLaunch(deathInfo))
@@ -132,10 +176,12 @@ namespace Oxide.Plugins
             if (magnitude <= 0f)
                 magnitude = 50f;
 
+            float multiplier = GetLaunchForceMultiplierForWeapon(deathInfo);
+
             var impactInfo = new ImpactInfo
             {
                 Direction = direction,
-                Force = magnitude * _config.ImpactForceMultiplier
+                Force = magnitude * multiplier
             };
 
             _pendingImpacts[victim.userID] = impactInfo;
@@ -160,7 +206,7 @@ namespace Oxide.Plugins
 
         private void OnEntitySpawned(NPCPlayerCorpse corpse)
         {
-            if (corpse == null || !_config.IncludeNPCCorpses)
+            if (corpse == null || !_config.AffectNPCCorpses)
                 return;
 
             ImpactInfo impactInfo;
@@ -219,21 +265,43 @@ namespace Oxide.Plugins
 
         private bool CanWeaponTriggerLaunch(HitInfo deathInfo)
         {
-            if (_config.AllowedKillerWeaponShortnames == null || _config.AllowedKillerWeaponShortnames.Count == 0)
-                return true;
+            string shortname = GetWeaponShortnameFromHitInfo(deathInfo);
 
-            string foundName = GetWeaponShortnameFromHitInfo(deathInfo);
-            if (string.IsNullOrEmpty(foundName))
-                return false;
+            if (string.IsNullOrEmpty(shortname))
+                return _config.EnableForUnlistedWeapons;
 
-            for (int i = 0; i < _config.AllowedKillerWeaponShortnames.Count; i++)
+            if (_config.WeaponOverrides != null && _config.WeaponOverrides.Count > 0)
             {
-                string allowed = _config.AllowedKillerWeaponShortnames[i];
-                if (!string.IsNullOrEmpty(allowed) && string.Equals(allowed, foundName, StringComparison.OrdinalIgnoreCase))
-                    return true;
+                WeaponOverrideConfig weaponOverride;
+                if (_config.WeaponOverrides.TryGetValue(shortname, out weaponOverride))
+                    return weaponOverride != null && weaponOverride.Enabled;
             }
 
-            return false;
+            return _config.EnableForUnlistedWeapons;
+        }
+
+        private float GetLaunchForceMultiplierForWeapon(HitInfo deathInfo)
+        {
+            float multiplier = _config.DefaultLaunchStrength;
+
+            if (_config.WeaponOverrides == null || _config.WeaponOverrides.Count == 0)
+                return multiplier;
+
+            string shortname = GetWeaponShortnameFromHitInfo(deathInfo);
+            if (string.IsNullOrEmpty(shortname))
+                return multiplier;
+            
+            WeaponOverrideConfig weaponOverride;
+            if (_config.WeaponOverrides.TryGetValue(shortname, out weaponOverride))
+            {
+                if (weaponOverride != null && weaponOverride.Enabled)
+                {
+                    if (weaponOverride.LaunchStrengthOverride > 0f)
+                        multiplier = weaponOverride.LaunchStrengthOverride;
+                }
+            }
+
+            return multiplier;
         }
 
         private void ApplyForceToCorpse(BaseCorpse corpse, ImpactInfo impactInfo)
